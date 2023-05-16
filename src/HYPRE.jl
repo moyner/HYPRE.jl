@@ -3,8 +3,7 @@
 module HYPRE
 
 using MPI: MPI
-using PartitionedArrays: IndexRange, MPIData, PSparseMatrix, PVector, PartitionedArrays,
-    SequentialData, map_parts
+using PartitionedArrays: own_length, local_to_global, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
 using SparseArrays: SparseArrays, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
 using SparseMatricesCSR: SparseMatrixCSR, colvals, getrowptr
 
@@ -335,11 +334,14 @@ end
 ##################################################
 
 # TODO: This has some duplicated code with to_hypre_data(::SparseMatrixCSC, ilower, iupper)
-function Internals.to_hypre_data(A::SparseMatrixCSC, r::IndexRange, c::IndexRange)
+function Internals.to_hypre_data(A::SparseMatrixCSC, r::AbstractLocalIndices, c::AbstractLocalIndices)
     @assert r.oid_to_lid isa UnitRange && r.oid_to_lid.start == 1
 
-    ilower = r.lid_to_gid[r.oid_to_lid.start]
-    iupper = r.lid_to_gid[r.oid_to_lid.stop]
+    n_local = own_length(r)
+    ilower = local_to_global(r)[1]
+    iupper = local_to_global(r)[own_length(r)]
+    # ilower = r.lid_to_gid[r.oid_to_lid.start]
+    # iupper = r.lid_to_gid[r.oid_to_lid.stop]
     a_rows = rowvals(A)
     a_vals = nonzeros(A)
 
@@ -357,7 +359,7 @@ function Internals.to_hypre_data(A::SparseMatrixCSC, r::IndexRange, c::IndexRang
     @inbounds for j in 1:size(A, 2)
         for i in nzrange(A, j)
             row = a_rows[i]
-            row > r.oid_to_lid.stop && continue # Skip ghost rows
+            row > n_local && continue # Skip ghost rows
             # grow = r.lid_to_gid[lrow]
             ncols[row] += 1
         end
@@ -391,11 +393,12 @@ end
 # TODO: Possibly this can be optimized if it is possible to pass overlong vectors to HYPRE.
 #       At least values should be possible to directly share, but cols needs to translated
 #       to global ids.
-function Internals.to_hypre_data(A::SparseMatrixCSR, r::IndexRange, c::IndexRange)
+function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c::AbstractLocalIndices)
     @assert r.oid_to_lid isa UnitRange && r.oid_to_lid.start == 1
 
-    ilower = r.lid_to_gid[r.oid_to_lid.start]
-    iupper = r.lid_to_gid[r.oid_to_lid.stop]
+    ilower = local_to_global(r)[1]
+    iupper = local_to_global(r)[own_length(r)]
+
     a_cols = colvals(A)
     a_vals = nonzeros(A)
     nnz = getrowptr(A)[r.oid_to_lid.stop + 1] - 1
@@ -425,18 +428,18 @@ function Internals.to_hypre_data(A::SparseMatrixCSR, r::IndexRange, c::IndexRang
     return nrows, ncols, rows, cols, values
 end
 
-function Internals.get_comm(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIData
+function Internals.get_comm(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIArray
     return A.rows.partition.comm
 end
 Internals.get_comm(_::Union{PSparseMatrix,PVector}) = MPI.COMM_SELF
 
-function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIData
+function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIArray
     r = A.rows.partition.part
     ilower::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[1]]
     iupper::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[end]]
     return ilower, iupper
 end
-function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:S}, PVector{<:Any,<:S}}) where S <: SequentialData
+function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:S}, PVector{<:Any,<:S}}) where S <: Array
     ilower::HYPRE_BigInt = typemax(HYPRE_BigInt)
     iupper::HYPRE_BigInt = typemin(HYPRE_BigInt)
     for r in A.rows.partition.parts
@@ -454,7 +457,7 @@ function HYPREMatrix(B::PSparseMatrix)
     # Create the IJ matrix
     A = HYPREMatrix(comm, ilower, iupper)
     # Set all the values
-    map_parts(B.values, B.rows.partition, B.cols.partition) do Bv, Br, Bc
+    map(B.cache, B.row_partition, B.col_partition) do Bv, Br, Bc
         nrows, ncols, rows, cols, values = Internals.to_hypre_data(Bv, Br, Bc)
         @check HYPRE_IJMatrixSetValues(A, nrows, ncols, rows, cols, values)
         return nothing
@@ -476,7 +479,7 @@ function HYPREVector(v::PVector)
     # Create the IJ vector
     b = HYPREVector(comm, ilower, iupper)
     # Set all the values
-    map_parts(v.values, v.owned_values, v.rows.partition) do _, vo, vr
+    map(local_values(v), own_values(v), partition(v)) do _, vo, vr
         ilower_part = vr.lid_to_gid[vr.oid_to_lid.start]
         iupper_part = vr.lid_to_gid[vr.oid_to_lid.stop]
 
@@ -520,7 +523,7 @@ end
 # TODO: Other eltypes could be support by using a intermediate buffer
 function Base.copy!(dst::PVector{HYPRE_Complex}, src::HYPREVector)
     Internals.copy_check(src, dst)
-    map_parts(dst.values, dst.owned_values, dst.rows.partition) do vv, _, vr
+    map_parts(dst.values, dst.own_values, dst.rows.partition) do vv, _, vr
         il_src_part = vr.lid_to_gid[vr.oid_to_lid.start]
         iu_src_part = vr.lid_to_gid[vr.oid_to_lid.stop]
         nvalues = HYPRE_Int(iu_src_part - il_src_part + 1)
@@ -541,7 +544,7 @@ function Base.copy!(dst::HYPREVector, src::PVector{HYPRE_Complex})
     Internals.copy_check(dst, src)
     # Re-initialize the vector
     @check HYPRE_IJVectorInitialize(dst)
-    map_parts(src.values, src.owned_values, src.rows.partition) do vv, _, vr
+    map_parts(src.values, src.own_values, src.rows.partition) do vv, _, vr
         ilower_src_part = vr.lid_to_gid[vr.oid_to_lid.start]
         iupper_src_part = vr.lid_to_gid[vr.oid_to_lid.stop]
         nvalues = HYPRE_Int(iupper_src_part - ilower_src_part + 1)

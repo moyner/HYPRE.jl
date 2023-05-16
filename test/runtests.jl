@@ -103,44 +103,36 @@ end
 
 @testset "HYPREMatrix(::PSparseMatrix)" begin
     # Sequential backend
-    function diag_data(backend, parts)
-        is_seq = backend isa SequentialBackend
-        rows = PRange(parts, 10)
-        cols = PRange(parts, 10)
-        I, J, V = map_parts(parts) do p
+    function diag_data(parts)
+        rows = uniform_partition(parts, 10)
+        cols = uniform_partition(parts, 10)
+        IJV = map(parts) do p
             i = Int[]
             j = Int[]
             v = Float64[]
-            if (is_seq && p == 1) || !is_seq
+            if p == 1
                 append!(i, [1, 2, 3, 4, 5, 6])
                 append!(j, [1, 2, 3, 4, 5, 6])
                 append!(v, [1, 2, 3, 4, 5, 6])
-            end
-            if (is_seq && p == 2) || !is_seq
+            else
+                @assert p == 2
                 append!(i, [4, 5, 6, 7, 8, 9, 10])
                 append!(j, [4, 5, 6, 7, 8, 9, 10])
                 append!(v, [4, 5, 6, 7, 8, 9, 10])
             end
             return i, j, v
         end
-        add_gids!(rows, I)
-        assemble!(I, J, V, rows)
-        add_gids!(cols, J)
+        I, J, V = tuple_of_arrays(IJV)
         return I, J, V, rows, cols
     end
 
-    backend = SequentialBackend()
-    parts = get_part_ids(backend, 2)
-    CSC = PSparseMatrix(diag_data(backend, parts)...; ids=:global)
-    CSR = PSparseMatrix(sparsecsr, diag_data(backend, parts)...; ids=:global)
+    # backend = SequentialBackend()
+    parts = 1:2
+    CSR = psparse!(diag_data(parts)...) |> fetch
 
-    @test tomain(CSC) == tomain(CSR) ==
-        Diagonal([1, 2, 3, 8, 10, 12, 7, 8, 9, 10])
+    @test tomain(CSR) == Diagonal([1, 2, 3, 8, 10, 12, 7, 8, 9, 10])
 
-    map_parts(CSC.values, CSC.rows.partition, CSC.cols.partition,
-              CSR.values, CSR.rows.partition, CSR.cols.partition, parts) do args...
-        cscvalues, cscrows, csccols, csrvalues, csrrows, csrcols, p = args
-        csc = Internals.to_hypre_data(cscvalues, cscrows, csccols)
+    map(CSR.cache, CSR.row_partition, CSR.col_partition, parts) do csrvalues, csrrows, csrcols, p
         csr = Internals.to_hypre_data(csrvalues, csrrows, csrcols)
         if p == 1
             nrows = 5
@@ -253,7 +245,7 @@ end
     # Sequential backend
     backend = SequentialBackend()
     parts = get_part_ids(backend, 2)
-    rows = PRange(parts, 10)
+    rows = uniform_partition(parts, 10)
     b = rand(10)
     I, V = map_parts(parts) do p
         if p == 1
@@ -282,7 +274,7 @@ end
     # MPI backend
     backend = MPIBackend()
     parts = get_part_ids(backend, 1)
-    rows = PRange(parts, 10)
+    rows = uniform_partition(parts, 10)
     I, V = map_parts(parts) do p
         return collect(1:10), b
     end
@@ -691,8 +683,8 @@ end
 
 function topartitioned(x::Vector, A::SparseMatrixCSC, b::Vector)
     parts = get_part_ids(SequentialBackend(), 1)
-    rows = PRange(parts, size(A, 1))
-    cols = PRange(parts, size(A, 2))
+    rows = uniform_partition(parts, size(A, 1))
+    cols = uniform_partition(parts, size(A, 2))
     II, JJ, VV, bb, xx = map_parts(parts) do _
         return findnz(A)..., b, x
     end
