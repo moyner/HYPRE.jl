@@ -3,7 +3,7 @@
 module HYPRE
 
 using MPI: MPI
-using PartitionedArrays: own_length, own_to_local, local_to_global, global_to_local, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
+using PartitionedArrays: own_length, tuple_of_arrays, global_length, own_to_local, local_to_global, global_to_own, global_to_local, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
 using SparseArrays: SparseArrays, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
 using SparseMatricesCSR: SparseMatrixCSR, colvals, getrowptr
 
@@ -441,18 +441,26 @@ end
 Internals.get_comm(_::Union{PSparseMatrix,PVector}) = MPI.COMM_SELF
 
 function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIArray
-    r = A.rows.partition.part
+    r = A.index_partition
     ilower::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[1]]
     iupper::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[end]]
     return ilower, iupper
 end
-function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:S}, PVector{<:Any,<:S}}) where S <: Array
+function Internals.get_proc_rows(A::Union{PSparseMatrix, PVector{<:Any,<:S}}) where S <: AbstractArray
     ilower::HYPRE_BigInt = typemax(HYPRE_BigInt)
     iupper::HYPRE_BigInt = typemin(HYPRE_BigInt)
-    for r in A.rows.partition.parts
-        ilower = min(r.lid_to_gid[r.oid_to_lid[1]], ilower)
-        iupper = max(r.lid_to_gid[r.oid_to_lid[end]], iupper)
+    low_high = map(A.index_partition) do a
+        l_to_g = local_to_global(a)
+        o_to_l = own_to_local(a)
+        ilower_part = l_to_g[o_to_l.start]
+        iupper_part = l_to_g[o_to_l.stop]
+        return ilower_part, iupper_part
+        # ilower = min(r.lid_to_gid[r.oid_to_lid[1]], ilower)
+        # iupper = max(r.lid_to_gid[r.oid_to_lid[end]], iupper)
     end
+    low, high = tuple_of_arrays(low_high)
+    ilower = convert(HYPRE_BigInt, reduce(min, low))
+    iupper = convert(HYPRE_BigInt, reduce(max, high))
     return ilower, iupper
 end
 
@@ -486,9 +494,14 @@ function HYPREVector(v::PVector)
     # Create the IJ vector
     b = HYPREVector(comm, ilower, iupper)
     # Set all the values
-    map(local_values(v), own_values(v), partition(v)) do _, vo, vr
-        ilower_part = vr.lid_to_gid[vr.oid_to_lid.start]
-        iupper_part = vr.lid_to_gid[vr.oid_to_lid.stop]
+    map(local_values(v), own_values(v), v.index_partition) do _, vo, vr
+        l_to_g = local_to_global(vr)
+        o_to_l = own_to_local(vr)
+        ilower_part = l_to_g[o_to_l.start]
+        iupper_part = l_to_g[o_to_l.stop]
+
+        # ilower_part = vr.lid_to_gid[vr.oid_to_lid.start]
+        # iupper_part = vr.lid_to_gid[vr.oid_to_lid.stop]
 
         # Option 1: Set all values
         nvalues = HYPRE_Int(iupper_part - ilower_part + 1)
@@ -515,6 +528,57 @@ function HYPREVector(v::PVector)
     Internals.assemble_vector(b)
     return b
 end
+
+# function HYPREVector(v::PVector{<:Any,<:M}) where M <: AbstractArray
+#     # Use the same communicator as the matrix
+#     comm = Internals.get_comm(v)
+#     # Create the IJ vector. For AbstractArray subtypes the processor owns all
+#     # rows but assembly is split up to mimick MPI behavior.
+#     # lengths = map(partition(v)) do v_i
+#     #     # Workaround for issue with debug array
+#     #     length(v_i)
+#     # end
+#     # n = sum(lengths)
+#     b = HYPREVector(comm, 1, length(v))
+
+
+#     # Set all the values
+#     map(own_values(v), partition(v)) do vo, vr
+#         @info "?!" vo vr
+#         # l_to_g = local_to_global(vr)
+#         o_to_l = own_to_local(vr)
+#         ilower_part = l_to_g[o_to_l.start]
+#         iupper_part = l_to_g[o_to_l.stop]
+
+#         # ilower_part = vr.lid_to_gid[vr.oid_to_lid.start]
+#         # iupper_part = vr.lid_to_gid[vr.oid_to_lid.stop]
+
+#         # Option 1: Set all values
+#         nvalues = HYPRE_Int(iupper_part - ilower_part + 1)
+#         indices = collect(HYPRE_BigInt, ilower_part:iupper_part)
+#         # TODO: Could probably just pass the full vector even if it is too long
+#         # values = convert(Vector{HYPRE_Complex}, vv)
+#         values = collect(HYPRE_Complex, vo)
+
+#         # # Option 2: Set only non-zeros
+#         # indices = HYPRE_BigInt[]
+#         # values = HYPRE_Complex[]
+#         # for (i, vi) in zip(ilower_part:iupper_part, vo)
+#         #     if !iszero(vi)
+#         #         push!(indices, i)
+#         #         push!(values, vi)
+#         #     end
+#         # end
+#         # nvalues = length(indices)
+
+#         @check HYPRE_IJVectorSetValues(b, nvalues, indices, values)
+#         return nothing
+#     end
+#     # Finalize
+#     Internals.assemble_vector(b)
+#     return b
+# end
+
 
 function Internals.copy_check(dst::HYPREVector, src::PVector)
     il_dst, iu_dst = Internals.get_proc_rows(dst)
