@@ -336,14 +336,13 @@ end
 # TODO: This has some duplicated code with to_hypre_data(::SparseMatrixCSC, ilower, iupper)
 function Internals.to_hypre_data(A::SparseMatrixCSC, r::AbstractLocalIndices, c::AbstractLocalIndices)
     g_to_l_rows = global_to_local(r) # Not sure about this assert
+    l_to_g_rows = local_to_global(r)
     @assert g_to_l_rows.own_to_local isa UnitRange && g_to_l_rows.own_to_local.start == 1
 
     n_local_rows = own_length(r)
     n_local_cols = own_length(c)
-    ilower = g_to_l_rows[1]
-    iupper = g_to_l_rows[own_length(r)]
-    # ilower = r.lid_to_gid[r.oid_to_lid.start]
-    # iupper = r.lid_to_gid[r.oid_to_lid.stop]
+    ilower = l_to_g_rows[1]
+    iupper = l_to_g_rows[own_length(r)]
     a_rows = rowvals(A)
     a_vals = nonzeros(A)
 
@@ -398,12 +397,13 @@ end
 #       to global ids.
 function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c::AbstractLocalIndices)
     g_to_l_rows = global_to_local(r)
+    l_to_g_rows = local_to_global(r)
     @assert g_to_l_rows.own_to_local isa UnitRange && g_to_l_rows.own_to_local.start == 1
 
     n_local_rows = own_length(r)
     n_local_cols = own_length(c)
-    ilower = g_to_l_rows[1]
-    iupper = g_to_l_rows[own_length(r)]
+    ilower = l_to_g_rows[1]
+    iupper = l_to_g_rows[n_local_rows]
 
     a_cols = colvals(A)
     a_vals = nonzeros(A)
@@ -411,7 +411,7 @@ function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c:
 
     # Initialize the data buffers HYPRE wants
     nrows = HYPRE_Int(iupper - ilower + 1)      # Total number of rows
-    ncols = zeros(HYPRE_Int, nrows)             # Number of colums for each row
+    ncols = zeros(HYPRE_Int, nrows)             # Number of columns for each row
     rows = collect(HYPRE_BigInt, ilower:iupper) # The row indices
     cols = Vector{HYPRE_BigInt}(undef, nnz)     # The column indices
     values = Vector{HYPRE_Complex}(undef, nnz)  # The values
