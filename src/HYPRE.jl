@@ -494,14 +494,12 @@ function HYPREVector(v::PVector)
     # Create the IJ vector
     b = HYPREVector(comm, ilower, iupper)
     # Set all the values
-    map(local_values(v), own_values(v), v.index_partition) do _, vo, vr
-        l_to_g = local_to_global(vr)
-        o_to_l = own_to_local(vr)
-        ilower_part = l_to_g[o_to_l.start]
-        iupper_part = l_to_g[o_to_l.stop]
+    map(own_values(v), v.index_partition) do vo, vr
+        o_to_g = PartitionedArrays.own_to_global(vr)
 
-        # ilower_part = vr.lid_to_gid[vr.oid_to_lid.start]
-        # iupper_part = vr.lid_to_gid[vr.oid_to_lid.stop]
+        ilower_part = o_to_g[1]
+        iupper_part = o_to_g[end]
+
 
         # Option 1: Set all values
         nvalues = HYPRE_Int(iupper_part - ilower_part + 1)
