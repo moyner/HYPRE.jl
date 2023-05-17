@@ -3,7 +3,7 @@
 module HYPRE
 
 using MPI: MPI
-using PartitionedArrays: own_length, tuple_of_arrays, global_length, own_to_local, local_to_global, global_to_own, global_to_local, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
+using PartitionedArrays: own_length, tuple_of_arrays, own_to_global, global_length, own_to_local, local_to_global, global_to_own, global_to_local, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
 using SparseArrays: SparseArrays, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
 using SparseMatricesCSR: SparseMatrixCSR, colvals, getrowptr
 
@@ -495,7 +495,7 @@ function HYPREVector(v::PVector)
     b = HYPREVector(comm, ilower, iupper)
     # Set all the values
     map(own_values(v), v.index_partition) do vo, vr
-        o_to_g = PartitionedArrays.own_to_global(vr)
+        o_to_g = own_to_global(vr)
 
         ilower_part = o_to_g[1]
         iupper_part = o_to_g[end]
@@ -590,36 +590,30 @@ function Internals.copy_check(dst::HYPREVector, src::PVector)
 end
 
 # TODO: Other eltypes could be support by using a intermediate buffer
-function Base.copy!(dst::PVector{HYPRE_Complex}, src::HYPREVector)
+function Base.copy!(dst::PVector, src::HYPREVector)
     Internals.copy_check(src, dst)
-    map_parts(dst.values, dst.own_values, dst.rows.partition) do vv, _, vr
-        il_src_part = vr.lid_to_gid[vr.oid_to_lid.start]
-        iu_src_part = vr.lid_to_gid[vr.oid_to_lid.stop]
+    map(own_values(dst), dst.index_partition) do ov, vr
+        o_to_g = own_to_global(vr)
+        il_src_part = o_to_g[1]
+        iu_src_part = o_to_g[end]
         nvalues = HYPRE_Int(iu_src_part - il_src_part + 1)
         indices = collect(HYPRE_BigInt, il_src_part:iu_src_part)
-
-        # Assumption: the dst vector is assembled, and should thus have 0s on the ghost
-        # entries (??). If this is not true, we must call fill!(vv, 0) here. This should be
-        # fairly cheap anyway, so might as well do it...
-        fill!(vv, 0)
-
-        # TODO: Safe to use vv here? Owned values are always first?
-        @check HYPRE_IJVectorGetValues(src, nvalues, indices, vv)
+        @check HYPRE_IJVectorGetValues(src, nvalues, indices, ov)
     end
     return dst
 end
 
-function Base.copy!(dst::HYPREVector, src::PVector{HYPRE_Complex})
+function Base.copy!(dst::HYPREVector, src::PVector)
     Internals.copy_check(dst, src)
     # Re-initialize the vector
     @check HYPRE_IJVectorInitialize(dst)
-    map_parts(src.values, src.own_values, src.rows.partition) do vv, _, vr
-        ilower_src_part = vr.lid_to_gid[vr.oid_to_lid.start]
-        iupper_src_part = vr.lid_to_gid[vr.oid_to_lid.stop]
+    map(own_values(src), src.index_partition) do ov, vr
+        o_to_g = own_to_global(vr)
+        ilower_src_part = o_to_g[1]
+        iupper_src_part = o_to_g[end]
         nvalues = HYPRE_Int(iupper_src_part - ilower_src_part + 1)
         indices = collect(HYPRE_BigInt, ilower_src_part:iupper_src_part)
-        # TODO: Safe to use vv here? Owned values are always first?
-        @check HYPRE_IJVectorSetValues(dst, nvalues, indices, vv)
+        @check HYPRE_IJVectorSetValues(dst, nvalues, indices, ov)
     end
     # TODO: It shouldn't be necessary to assemble here since we only set owned rows (?)
     # @check HYPRE_IJVectorAssemble(dst)
