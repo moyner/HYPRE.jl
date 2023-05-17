@@ -3,7 +3,7 @@
 module HYPRE
 
 using MPI: MPI
-using PartitionedArrays: own_length, local_to_global, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
+using PartitionedArrays: own_length, own_to_local, local_to_global, global_to_local, MPIArray, PSparseMatrix, PVector, PartitionedArrays, AbstractLocalIndices, local_values, own_values, partition
 using SparseArrays: SparseArrays, SparseMatrixCSC, nnz, nonzeros, nzrange, rowvals
 using SparseMatricesCSR: SparseMatrixCSR, colvals, getrowptr
 
@@ -335,11 +335,13 @@ end
 
 # TODO: This has some duplicated code with to_hypre_data(::SparseMatrixCSC, ilower, iupper)
 function Internals.to_hypre_data(A::SparseMatrixCSC, r::AbstractLocalIndices, c::AbstractLocalIndices)
-    @assert r.oid_to_lid isa UnitRange && r.oid_to_lid.start == 1
+    g_to_l_rows = global_to_local(r) # Not sure about this assert
+    @assert g_to_l_rows.own_to_local isa UnitRange && g_to_l_rows.own_to_local.start == 1
 
-    n_local = own_length(r)
-    ilower = local_to_global(r)[1]
-    iupper = local_to_global(r)[own_length(r)]
+    n_local_rows = own_length(r)
+    n_local_cols = own_length(c)
+    ilower = g_to_l_rows[1]
+    iupper = g_to_l_rows[own_length(r)]
     # ilower = r.lid_to_gid[r.oid_to_lid.start]
     # iupper = r.lid_to_gid[r.oid_to_lid.stop]
     a_rows = rowvals(A)
@@ -359,7 +361,7 @@ function Internals.to_hypre_data(A::SparseMatrixCSC, r::AbstractLocalIndices, c:
     @inbounds for j in 1:size(A, 2)
         for i in nzrange(A, j)
             row = a_rows[i]
-            row > n_local && continue # Skip ghost rows
+            row > n_local_rows && continue # Skip ghost rows
             # grow = r.lid_to_gid[lrow]
             ncols[row] += 1
         end
@@ -376,13 +378,14 @@ function Internals.to_hypre_data(A::SparseMatrixCSC, r::AbstractLocalIndices, c:
 
     # Second pass to populate the output -- here we need to take care of the permutation
     # of columns. TODO: Problem that they are not sorted?
+    l_to_g_cols = local_to_global(c)
     @inbounds for j in 1:size(A, 2)
         for i in nzrange(A, j)
             row = a_rows[i]
-            row > r.oid_to_lid.stop && continue # Skip ghost rows
+            row > n_local_cols && continue # Skip ghost rows
             k = lastinds[row] += 1
             val = a_vals[i]
-            cols[k] = c.lid_to_gid[j]
+            cols[k] = l_to_g_cols[j]
             values[k] = val
         end
     end
@@ -394,14 +397,17 @@ end
 #       At least values should be possible to directly share, but cols needs to translated
 #       to global ids.
 function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c::AbstractLocalIndices)
-    @assert r.oid_to_lid isa UnitRange && r.oid_to_lid.start == 1
+    g_to_l_rows = global_to_local(r)
+    @assert g_to_l_rows.own_to_local isa UnitRange && g_to_l_rows.own_to_local.start == 1
 
-    ilower = local_to_global(r)[1]
-    iupper = local_to_global(r)[own_length(r)]
+    n_local_rows = own_length(r)
+    n_local_cols = own_length(c)
+    ilower = g_to_l_rows[1]
+    iupper = g_to_l_rows[own_length(r)]
 
     a_cols = colvals(A)
     a_vals = nonzeros(A)
-    nnz = getrowptr(A)[r.oid_to_lid.stop + 1] - 1
+    nnz = getrowptr(A)[n_local_rows + 1] - 1
 
     # Initialize the data buffers HYPRE wants
     nrows = HYPRE_Int(iupper - ilower + 1)      # Total number of rows
@@ -411,15 +417,16 @@ function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c:
     values = Vector{HYPRE_Complex}(undef, nnz)  # The values
 
     # Loop over the (owned) rows and collect all values
+    l_to_g_cols = local_to_global(c)
     k = 0
-    @inbounds for i in r.oid_to_lid
+    @inbounds for i in own_to_local(r)
         nzr = nzrange(A, i)
         ncols[i] = length(nzr)
         for j in nzr
             k += 1
             col = a_cols[j]
             val = a_vals[j]
-            cols[k] = c.lid_to_gid[col]
+            cols[k] = l_to_g_cols[col]
             values[k] = val
         end
     end
