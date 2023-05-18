@@ -436,27 +436,40 @@ function Internals.to_hypre_data(A::SparseMatrixCSR, r::AbstractLocalIndices, c:
 end
 
 function Internals.get_comm(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIArray
-    return A.rows.partition.comm
+    return partition(A).comm
 end
+
 Internals.get_comm(_::Union{PSparseMatrix,PVector}) = MPI.COMM_SELF
 
-function Internals.get_proc_rows(A::Union{PSparseMatrix{<:Any,<:M}, PVector{<:Any,<:M}}) where M <: MPIArray
-    r = A.index_partition
-    ilower::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[1]]
-    iupper::HYPRE_BigInt = r.lid_to_gid[r.oid_to_lid[end]]
-    return ilower, iupper
-end
-function Internals.get_proc_rows(A::Union{PSparseMatrix, PVector{<:Any,<:S}}) where S <: AbstractArray
+# function Internals.get_proc_rows(A::PVector{<:Any,<:M}) where M <: MPIArray
+#     r = A.index_partition
+#     o_to_g = own_to_global(r)
+#     ilower::HYPRE_BigInt = o_to_g[1]
+#     iupper::HYPRE_BigInt = o_to_g[end]
+#     return ilower, iupper
+# end
+
+# function Internals.get_proc_rows(A::PSparseMatrix{<:Any,<:M}) where M <: MPIArray
+#     r = A.row_partition
+#     o_to_g = own_to_global(r)
+#     ilower::HYPRE_BigInt = o_to_g[1]
+#     iupper::HYPRE_BigInt = o_to_g[end]
+#     return ilower, iupper
+# end
+
+function Internals.get_proc_rows(A::Union{PSparseMatrix, PVector})
+    if A isa PVector
+        r = A.index_partition
+    else
+        r = A.row_partition
+    end
     ilower::HYPRE_BigInt = typemax(HYPRE_BigInt)
     iupper::HYPRE_BigInt = typemin(HYPRE_BigInt)
     low_high = map(A.index_partition) do a
-        l_to_g = local_to_global(a)
-        o_to_l = own_to_local(a)
-        ilower_part = l_to_g[o_to_l.start]
-        iupper_part = l_to_g[o_to_l.stop]
+        o_to_g = own_to_global(a)
+        ilower_part = o_to_g[1]
+        iupper_part = o_to_g[end]
         return ilower_part, iupper_part
-        # ilower = min(r.lid_to_gid[r.oid_to_lid[1]], ilower)
-        # iupper = max(r.lid_to_gid[r.oid_to_lid[end]], iupper)
     end
     low, high = tuple_of_arrays(low_high)
     ilower = convert(HYPRE_BigInt, reduce(min, low))
@@ -499,7 +512,6 @@ function HYPREVector(v::PVector)
 
         ilower_part = o_to_g[1]
         iupper_part = o_to_g[end]
-
 
         # Option 1: Set all values
         nvalues = HYPRE_Int(iupper_part - ilower_part + 1)
